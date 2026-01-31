@@ -15,6 +15,75 @@ from lerobot.utils.robot_utils import precise_sleep
 # Configuration
 FPS = 30
 DATASET_ROOT = "dataset"
+# Robot Arm Lengths (Approximate for SO-100)
+L1 = 10.0
+L2 = 10.0
+
+def solve_ik(current_lift, current_elbow, delta_radius):
+    """
+    Calculates new joint angles to change radius by delta_radius
+    while keeping Z height constant.
+    Input/Output in Degrees.
+    Assumes Vertical Reference Frame (0 deg = Vertical Up).
+    """
+    import math
+    
+    # Convert to radians
+    th1 = math.radians(current_lift)
+    th2 = math.radians(current_elbow)
+    
+    # Forward Kinematics (Vertical Reference)
+    # Radius (r) = L1*sin(th1) + L2*sin(th1 + th2)
+    # Height (z) = L1*cos(th1) + L2*cos(th1 + th2)
+    
+    r = L1 * math.sin(th1) + L2 * math.sin(th1 + th2)
+    z = L1 * math.cos(th1) + L2 * math.cos(th1 + th2)
+    
+    # Target
+    r_new = r + delta_radius
+    z_new = z # Keep height constant
+    
+    # Inverse Kinematics
+    # Distance to target (d^2 = r^2 + z^2)
+    d_sq = r_new**2 + z_new**2
+    d = math.sqrt(d_sq)
+    
+    # Limit Reach
+    max_reach = L1 + L2 - 0.1
+    if d > max_reach:
+        d = max_reach
+    
+    # Alpha (angle to target vector relative to Vertical)
+    # tan(alpha) = r / z
+    alpha = math.atan2(r_new, z_new)
+    
+    # Law of Cosines (remains same geometry)
+    # c^2 = a^2 + b^2 - 2ab cos(C)
+    try:
+        cos_beta = (L1**2 + d_sq - L2**2) / (2 * L1 * d)
+        beta = math.acos(np.clip(cos_beta, -1.0, 1.0))
+        
+        # New Theta 1 (Shoulder Lift)
+        th1_new = alpha + beta
+        
+        # New Theta 2 (Elbow Flex)
+        # Using coordinates to find angle of forearm
+        r_elbow = L1 * math.sin(th1_new)
+        z_elbow = L1 * math.cos(th1_new)
+        
+        # Vector from elbow to wrist
+        r_forearm = r_new - r_elbow
+        z_forearm = z_new - z_elbow
+        
+        # Angle of forearm relative to vertical
+        th12 = math.atan2(r_forearm, z_forearm)
+        
+        th2_new = th12 - th1_new
+        
+        return math.degrees(th1_new), math.degrees(th2_new)
+        
+    except ValueError:
+        return current_lift, current_elbow
 
 def ensure_episode_dir(root):
     """Creates a new episode directory (e.g., episode_001) and returns it."""
@@ -149,78 +218,61 @@ def main():
             return val * abs(val) * abs(val)
 
         # Read Raw Inputs
-        ax0 = curve(joystick.get_axis(0)) # LS Left/Right -> Pan
-        ax1 = curve(joystick.get_axis(1)) # LS Up/Down    -> Lift OR Elbow (if Z-Lock)
-        ax3 = curve(joystick.get_axis(3)) # RS Left/Right -> Wrist Flex
-        ax4 = curve(joystick.get_axis(4)) # RS Up/Down    -> Elbow Flex (normal)
+        # Xbox Axes: 0=LS_X, 1=LS_Y, 3=RS_X, 4=RS_Y
+        ax0 = curve(joystick.get_axis(0))
+        ax1 = curve(joystick.get_axis(1))
+        ax3 = curve(joystick.get_axis(3))
+        ax4 = curve(joystick.get_axis(4))
         
-        lb = joystick.get_button(4) # Wrist Roll Left
-        rb = joystick.get_button(5) # Z-Lock Modifier / Wrist Roll Right
-        
-        btn_a = joystick.get_button(0) # Close Gripper
-        btn_b = joystick.get_button(1) # Open Gripper
+        # Read Modifiers & Buttons
+        rb_held = joystick.get_button(5) # Right Bumper for Z-Lock
+        trigger_l = joystick.get_axis(2) # Left Trigger -> Roll Left
+        trigger_r = joystick.get_axis(5) # Right Trigger -> Roll Right
+        btn_a = joystick.get_button(0)   # Close Gripper
+        btn_b = joystick.get_button(1)   # Open Gripper
 
-        # Base Speed
-        speed = 1.0  # Increased base speed because cubic curve dampens small inputs
+        # Base Speed (Higher because cubic curve dampens small inputs)
+        speed = 0.1
 
-        # 1. Shoulder Pan (Base Rotation)
+        # 1. Shoulder Pan (Left Stick X)
         if abs(ax0) > 0.01: 
             target_joints["shoulder_pan"] += ax0 * speed
 
-        # 2. Z-Plane Lock Logic (Right Bumper Modifier)
-        if rb:
-            # LOCKED MODE: RB Held -> LS Up/Down moves ELBOW (Reach), maintaining height
-            # We disable Shoulder Lift control here to "lock" height (conceptually)
-            # Actually user asked to move Elbow Flex to slide flatly.
+        # 2. Lift / Elbow Logic (Z-Lock)
+        if rb_held:
+            # --- Z-LOCKED MODE (Cartesian) ---
+            # RB Held: Left Stick Y changes RADIUS (Reach), keeping Height (Z) constant.
+            # Stick Up (Negative Axis) -> Increase Radius (Reach Out)
             if abs(ax1) > 0.01:
-                target_joints["elbow_flex"] -= ax1 * speed
-            
-            # Allow Wrist Roll with LB/RB? 
-            # If RB is Shift, we lose it as a button. 
-            # Let's map Wrist Roll to Triggers or something else?
-            # User instruction: "IF RB is Held... IF RB is Released".
-            # Implies RB is *only* a modifier now.
-            # So we need a new way to roll right? 
-            # Let's use LB for Left, and maybe Triggers for Roll?
-            # Or just keep LB for Roll Left, and accept we lost Roll Right on RB?
-            # User didn't specify replacement for Roll Right. 
-            # I will map simple logic: 
-            # LB = Roll Left
-            # (No Roll Right button available on Bumpers now)
-            pass
+                delta_r = -ax1 * speed * 0.5 # Scale down for precision
+                
+                # Get current angles
+                curr_lift = target_joints["shoulder_lift"]
+                curr_elbow = target_joints["elbow_flex"]
+                
+                # Solve IK
+                new_lift, new_elbow = solve_ik(curr_lift, curr_elbow, delta_r)
+                
+                # Apply
+                target_joints["shoulder_lift"] = new_lift
+                target_joints["elbow_flex"] = new_elbow
         else:
-            # NORMAL MODE: RB Released
-            # LS Up/Down moves Shoulder Lift (Height)
+            # --- NORMAL MODE ---
+            # RB Released: Left Stick Y moves SHOULDER LIFT (Height)
             if abs(ax1) > 0.01:
                 target_joints["shoulder_lift"] -= ax1 * speed
-                
-            # RS Up/Down moves Elbow Flex
+            
+            # Normal Elbow Control on Right Stick Y
             if abs(ax4) > 0.01:
                 target_joints["elbow_flex"] -= ax4 * speed
 
-            # RB as Roll Right (Normal)
-            # Wait, if RB is modifier, we can't use it for Roll Right simultaneously without conflict.
-            # User said "Use RB as Shift Key". 
-            # This implies RB is NO LONGER a functional button for other things.
-            # I will disable Roll Right on RB to avoid erratic behavior.
-            # Alternative: Use Triggers (Axis 2/5) for Roll?
-            # For strict compliance, I follows the Z-lock instruction.
-            # BUT I'll add a fallback: 
-            # Let's use Trigger axes for Roll if available, or just single-direction roll?
-            # I'll enable Roll Right if LB is NOT held, maybe? No.
-            # I will map Roll to Triggers (Axis 2 = LT, Axis 5 = RT on Xbox)
-            pass
-
-        # 3. Wrist Flex (RS Left/Right)
+        # 3. Wrist Flex (Right Stick X)
         if abs(ax3) > 0.01:
             target_joints["wrist_flex"] -= ax3 * speed
 
-        # 4. Wrist Roll (Triggers for reliability)
-        trigger_l = joystick.get_axis(2) # LT
-        trigger_r = joystick.get_axis(5) # RT
-        
-        # Win/Linux trigger mapping varies (-1 to 1 or 0 to 1). 
-        # Usually -1 is released, 1 is pressed.
+        # 4. Wrist Roll (Triggers)
+        # Triggers are analog (-1 to 1 or 0 to 1 depending on OS).
+        # We assume > 0.1 means pressed.
         if trigger_l > 0.1: target_joints["wrist_roll"] -= speed * 0.5
         if trigger_r > 0.1: target_joints["wrist_roll"] += speed * 0.5
 
