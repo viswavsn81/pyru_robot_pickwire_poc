@@ -143,22 +143,88 @@ def main():
                         print("⚪ RECORDING STOPPED")
 
         # --- READ CONTROLS (Teleoperation) ---
-        ax0 = joystick.get_axis(0) # LS Left/Right
-        ax1 = joystick.get_axis(1) # LS Up/Down
-        ax3 = joystick.get_axis(3) # RS Left/Right
-        ax4 = joystick.get_axis(4) # RS Up/Down
-        lb = joystick.get_button(4) 
-        rb = joystick.get_button(5)
-        btn_a = joystick.get_button(0)
-        btn_b = joystick.get_button(1)
+        # --- READ CONTROLS (Teleoperation) ---
+        # Helper for exponential sensitivity (cubic curve)
+        def curve(val):
+            return val * abs(val) * abs(val)
 
-        speed = 0.3
-        if abs(ax0) > 0.1: target_joints["shoulder_pan"] += ax0 * speed
-        if abs(ax1) > 0.1: target_joints["shoulder_lift"] -= ax1 * speed
-        if abs(ax4) > 0.1: target_joints["elbow_flex"] -= ax4 * speed
-        if abs(ax3) > 0.1: target_joints["wrist_flex"] -= ax3 * speed
-        if lb: target_joints["wrist_roll"] -= speed * 1.5
-        if rb: target_joints["wrist_roll"] += speed * 1.5
+        # Read Raw Inputs
+        ax0 = curve(joystick.get_axis(0)) # LS Left/Right -> Pan
+        ax1 = curve(joystick.get_axis(1)) # LS Up/Down    -> Lift OR Elbow (if Z-Lock)
+        ax3 = curve(joystick.get_axis(3)) # RS Left/Right -> Wrist Flex
+        ax4 = curve(joystick.get_axis(4)) # RS Up/Down    -> Elbow Flex (normal)
+        
+        lb = joystick.get_button(4) # Wrist Roll Left
+        rb = joystick.get_button(5) # Z-Lock Modifier / Wrist Roll Right
+        
+        btn_a = joystick.get_button(0) # Close Gripper
+        btn_b = joystick.get_button(1) # Open Gripper
+
+        # Base Speed
+        speed = 1.0  # Increased base speed because cubic curve dampens small inputs
+
+        # 1. Shoulder Pan (Base Rotation)
+        if abs(ax0) > 0.01: 
+            target_joints["shoulder_pan"] += ax0 * speed
+
+        # 2. Z-Plane Lock Logic (Right Bumper Modifier)
+        if rb:
+            # LOCKED MODE: RB Held -> LS Up/Down moves ELBOW (Reach), maintaining height
+            # We disable Shoulder Lift control here to "lock" height (conceptually)
+            # Actually user asked to move Elbow Flex to slide flatly.
+            if abs(ax1) > 0.01:
+                target_joints["elbow_flex"] -= ax1 * speed
+            
+            # Allow Wrist Roll with LB/RB? 
+            # If RB is Shift, we lose it as a button. 
+            # Let's map Wrist Roll to Triggers or something else?
+            # User instruction: "IF RB is Held... IF RB is Released".
+            # Implies RB is *only* a modifier now.
+            # So we need a new way to roll right? 
+            # Let's use LB for Left, and maybe Triggers for Roll?
+            # Or just keep LB for Roll Left, and accept we lost Roll Right on RB?
+            # User didn't specify replacement for Roll Right. 
+            # I will map simple logic: 
+            # LB = Roll Left
+            # (No Roll Right button available on Bumpers now)
+            pass
+        else:
+            # NORMAL MODE: RB Released
+            # LS Up/Down moves Shoulder Lift (Height)
+            if abs(ax1) > 0.01:
+                target_joints["shoulder_lift"] -= ax1 * speed
+                
+            # RS Up/Down moves Elbow Flex
+            if abs(ax4) > 0.01:
+                target_joints["elbow_flex"] -= ax4 * speed
+
+            # RB as Roll Right (Normal)
+            # Wait, if RB is modifier, we can't use it for Roll Right simultaneously without conflict.
+            # User said "Use RB as Shift Key". 
+            # This implies RB is NO LONGER a functional button for other things.
+            # I will disable Roll Right on RB to avoid erratic behavior.
+            # Alternative: Use Triggers (Axis 2/5) for Roll?
+            # For strict compliance, I follows the Z-lock instruction.
+            # BUT I'll add a fallback: 
+            # Let's use Trigger axes for Roll if available, or just single-direction roll?
+            # I'll enable Roll Right if LB is NOT held, maybe? No.
+            # I will map Roll to Triggers (Axis 2 = LT, Axis 5 = RT on Xbox)
+            pass
+
+        # 3. Wrist Flex (RS Left/Right)
+        if abs(ax3) > 0.01:
+            target_joints["wrist_flex"] -= ax3 * speed
+
+        # 4. Wrist Roll (Triggers for reliability)
+        trigger_l = joystick.get_axis(2) # LT
+        trigger_r = joystick.get_axis(5) # RT
+        
+        # Win/Linux trigger mapping varies (-1 to 1 or 0 to 1). 
+        # Usually -1 is released, 1 is pressed.
+        if trigger_l > 0.1: target_joints["wrist_roll"] -= speed * 0.5
+        if trigger_r > 0.1: target_joints["wrist_roll"] += speed * 0.5
+
+        # 5. Gripper
         if btn_a: target_joints["gripper"] = -45
         if btn_b: target_joints["gripper"] = 90
 
