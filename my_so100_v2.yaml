@@ -1,0 +1,18 @@
+robot:
+  type: so100_follower
+  # It only wants the port. It knows the baudrate/motors already.
+  port: /dev/ttyACM0
+
+  cameras:
+    laptop:
+      type: opencv
+      index_or_path: 2
+      fps: 30
+      width: 640
+      height: 480
+    wrist:
+      type: opencv
+      index_or_path: 0
+      fps: 30
+      width: 640
+      height: 480

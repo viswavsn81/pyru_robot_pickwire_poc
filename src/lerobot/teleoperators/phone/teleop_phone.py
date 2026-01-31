@@ -6,7 +6,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#      http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -85,10 +85,28 @@ class IOSPhone(BasePhone, Teleoperator):
     def connect(self) -> None:
         logger.info("Connecting to IPhone, make sure to open the HEBI Mobile I/O app.")
         lookup = hebi.Lookup()
-        time.sleep(2.0)
-        group = lookup.get_group_from_names(["HEBI"], ["mobileIO"])
+        
+        # TIMEOUT: Wait 6 seconds for network discovery
+        time.sleep(6.0)
+
+        # === NUCLEAR FIX V2 (Iterate instead of len()) ===
+        target = None
+        # The HEBI list does not support len(), so we just loop and grab the first one
+        for entry in lookup.entrylist:
+            target = entry
+            break
+            
+        if target is not None:
+            print(f"⚠️ FORCE CONNECTING to found device: '{target.name}' (Family: '{target.family}')")
+            group = lookup.get_group_from_names([target.family], [target.name])
+        else:
+            # Fallback if list was empty
+            group = lookup.get_group_from_names(["HEBI"], ["mobileIO"])
+        # === END FIX ===
+
         if group is None:
             raise RuntimeError("Mobile I/O not found — check name/family settings in the app.")
+        
         self._group = group
         logger.info(f"{self} connected to HEBI group with {group.size} module(s).")
 
@@ -230,6 +248,7 @@ class AndroidPhone(BasePhone, Teleoperator):
         self._teleop = Teleop()
         self._teleop.subscribe(self._android_callback)
         self._teleop_thread = threading.Thread(target=self._teleop.run, daemon=True)
+        self._teleop_thread.start()
         self._teleop_thread.start()
         logger.info(f"{self} connected, teleop stream started.")
 

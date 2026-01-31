@@ -1,0 +1,37 @@
+cd ~/lerobot && \
+cat << 'EOF' > my_so100.yaml
+# Custom Config for Pyru's SO-100 (Dual Camera)
+robot:
+  type: so100
+  protocol: simple_serial
+  port: /dev/ttyACM0
+  baudrate: 1000000
+  
+  motors:
+    shoulder_pan: [1, "xm430-w350"]
+    shoulder_lift: [2, "xm430-w350"]
+    elbow_flex: [3, "xm430-w350"]
+    wrist_flex: [4, "xl330-m288"]
+    wrist_roll: [5, "xl330-m288"]
+    gripper: [6, "xl330-m077"]
+
+  max_velocity: 1.0
+  max_acceleration: 1.0
+
+cameras:
+  # CAMERA 1: The Table View (Desk Camera)
+  laptop:
+    _target_: lerobot.common.robot_devices.cameras.opencv.OpenCVCamera
+    video_index: 2   # <--- Updated to use the Desk Camera
+    fps: 30
+    width: 640
+    height: 480
+
+  # CAMERA 2: The Wrist View
+  wrist:
+    _target_: lerobot.common.robot_devices.cameras.opencv.OpenCVCamera
+    video_index: 0   # <--- Updated to use the Wrist Camera
+    fps: 30
+    width: 640
+    height: 480
+EOF

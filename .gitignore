@@ -177,3 +177,21 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# Ignore Data and Outputs
+dataset/
+data/
+outputs/
+wandb/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore loose media files
+*.mp4
+*.jpg
+*.png
+
+# Ignore system files
+.DS_Store

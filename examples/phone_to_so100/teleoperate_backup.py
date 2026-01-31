@@ -9,9 +9,9 @@ from pathlib import Path
 
 # --- IMPORTS ---
 from lerobot.model.kinematics import RobotKinematics
-from lerobot.processor import RobotAction, RobotObservation
+from lerobot.processor import RobotAction, RobotObservation, ProcessorStep
 from lerobot.robots.so_follower import SO100Follower, SO100FollowerConfig
-# We import the steps but run them MANUALLY to bypass the strict Pipeline errors
+# Note: We import the steps but NOT the Pipeline class
 from lerobot.robots.so_follower.robot_kinematic_processor import (
     EEBoundsAndSafety,
     EEReferenceAndDelta,
@@ -42,10 +42,14 @@ class GamepadTeleopConfig:
         if self.calibration_dir is None:
             self.calibration_dir = Path(".cache/calibration")
 
-# --- SIMPLIFIED MAPPER (No Inheritance = No Abstract Method Errors) ---
-class CustomGamepadMapper:
+# --- CUSTOM MAPPER ---
+class CustomGamepadMapper(ProcessorStep):
     def __init__(self):
+        super().__init__()
         self.last_gripper_val = 0.0
+
+    def process(self, obs_tuple):
+        return self.__call__(obs_tuple)
 
     def __call__(self, obs_tuple):
         # 1. Unpack
@@ -58,14 +62,13 @@ class CustomGamepadMapper:
             
         raw_inputs = gamepad_obs.get("gamepad.raw_inputs", {})
         
-        # 2. Map Inputs [X, Y, Z, Rx, Ry, Rz, Gripper]
+        # 2. Map Inputs to 7-DoF Array [X, Y, Z, Rx, Ry, Rz, Gripper]
         action_array = np.zeros(7, dtype=np.float32)
         
-        # Left Stick (Pos)
-        action_array[0] = -raw_inputs.get("axis1", 0.0) # X
-        action_array[1] = -raw_inputs.get("axis0", 0.0) # Y
-        # Right Stick (Height)
-        action_array[2] = -raw_inputs.get("axis4", 0.0) # Z
+        # Sticks (Adjust signs/axes here if robot moves backwards/sideways)
+        action_array[0] = -raw_inputs.get("axis1", 0.0) # X (Fwd/Back)
+        action_array[1] = -raw_inputs.get("axis0", 0.0) # Y (Left/Right)
+        action_array[2] = -raw_inputs.get("axis4", 0.0) # Z (Up/Down)
         
         # Gripper Buttons
         if raw_inputs.get("btn0", 0): 
@@ -78,7 +81,7 @@ class CustomGamepadMapper:
         action_tensor = torch.from_numpy(action_array)
         out = RobotAction(action=action_tensor)
         
-        # 4. Merge Robot State (Crucial!)
+        # 4. Merge Robot State (Crucial for next steps)
         if isinstance(robot_obs, (dict, RobotObservation)):
             out.update(robot_obs)
             
@@ -102,7 +105,7 @@ def main():
         joint_names=list(robot.bus.motors.keys()),
     )
 
-    # 4. INSTANTIATE STEPS MANUALLY
+    # 4. INSTANTIATE STEPS MANUALLY (Bypassing Pipeline Wrapper)
     step_mapper = CustomGamepadMapper()
     
     step_ee_ref = EEReferenceAndDelta(
@@ -136,7 +139,7 @@ def main():
     teleop_device.connect()
     print("✅ Controller Connected!")
 
-    # 6. Pygame Window
+    # 6. Pygame Window (Click this!)
     pygame.display.init()
     window = pygame.display.set_mode((400, 400))
     pygame.display.set_caption("CLICK HERE TO CONTROL ROBOT")
@@ -154,29 +157,32 @@ def main():
     print("👉 STEP 2: Move sticks!")
     print("------------------\n")
 
+    # 7. MAIN LOOP (Manual Execution)
     while True:
         t0 = time.perf_counter()
         pygame.event.pump()
         
-        # A. Get Data
+        # A. Get Raw Data
         robot_obs = robot.get_observation()
         gamepad_obs = teleop_device.get_action()
         
+        # B. Run Steps Sequentially
+        #    Pass the result of one into the next.
         try:
-            # B. Run Steps Sequentially (The Manual Pipeline)
             state = step_mapper((gamepad_obs, robot_obs))
             state = step_ee_ref(state)
             state = step_safety(state)
             state = step_gripper(state)
             state = step_ik(state)
             
-            # C. Extract Action
+            # C. Extract Final Action
+            # If IK returns a dict, grab 'action'. If it returns a Tensor, use it directly.
             if isinstance(state, (dict, RobotAction)):
                 joint_action = state['action']
             else:
                 joint_action = state
             
-            # D. Send
+            # D. Send to Robot
             _ = robot.send_action(joint_action)
             
             # E. Log
@@ -184,6 +190,7 @@ def main():
             
         except Exception as e:
             print(f"Loop Error: {e}")
+            # Optional: break or continue depending on severity
             
         precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
 
