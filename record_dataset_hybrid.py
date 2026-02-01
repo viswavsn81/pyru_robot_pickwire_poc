@@ -264,6 +264,22 @@ def main():
                 text = font.render(f"REC Frame: {frame_idx}", True, (255, 0, 0))
                 screen.blit(text, (50, 20))
             
+            # Overlay Motor Positions
+            font_small = pygame.font.SysFont(None, 24)
+            # Background
+            bg_rect = pygame.Surface((220, 180)) # H,W
+            bg_rect.set_alpha(128)
+            bg_rect.fill((0, 0, 0))
+            screen.blit(bg_rect, (10, 60))
+            
+            y_offset = 70
+            for name in motor_names:
+                val = target_joints.get(name, 0.0)
+                # Show active/real value
+                text_surf = font_small.render(f"{name}: {val:.1f}", True, (200, 255, 200))
+                screen.blit(text_surf, (20, y_offset))
+                y_offset += 25
+            
             pygame.display.flip()
 
             # --- RECORDING ---
