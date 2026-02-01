@@ -10,7 +10,7 @@ from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.policies.factory import make_pre_post_processors
 
 # Configuration
-CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-01-30/12-44-18_so100_train_50ep/checkpoints/050000/pretrained_model")
+CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-01-31/10-42-55_so100_train_50ep/checkpoints/050000/pretrained_model")
 DEVICE = "cuda"
 FPS = 30
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
