@@ -1,3 +1,4 @@
+#!/bin/bash
 #!/usr/bin/env python
 
 import os
@@ -15,10 +16,6 @@ from lerobot.utils.robot_utils import precise_sleep
 # Configuration
 FPS = 30
 DATASET_ROOT = "dataset"
-# Robot Arm Lengths (Approximate for SO-100)
-# Robot Arm Lengths (Approximate for SO-100)
-# Not needed for standard teleop
-
 
 def ensure_episode_dir(root):
     """Creates a new episode directory (e.g., episode_001) and returns it."""
@@ -93,7 +90,7 @@ def main():
     # Use Pygame for display instead of OpenCV (avoids highgui errors)
     WINDOW_W, WINDOW_H = 1280, 480 # Two 640x480 images side-by-side
     screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-    pygame.display.set_caption("SO-100 Recorder - Press Y to Record, X to Exit")
+    pygame.display.set_caption("SO-100 Hybrid Recorder - Hold RT for Manual Mode")
 
     # -----------------------------
     # 4. INITIALIZE ROBOT STATE
@@ -115,8 +112,9 @@ def main():
     # -----------------------------
     print("\n🚀 READY! Controls:")
     print("  [Start] / [Y]: Toggle Recording")
-    print("  [Back] / [X]:  Exit")
-    print("  Sticks/Bumpers/Buttons: Move Robot\n")
+    print("  [Back] / [Guide]:   Exit")
+    print("  [Hold RT]:     Manual Mode (Limp/Follow)")
+    print("  [Sticks]:      Drive Robot (Joysticks)\n")
 
     recording = False
     current_ep_dir = None
@@ -133,6 +131,7 @@ def main():
             
             # Button Downs for Toggles
             if event.type == pygame.JOYBUTTONDOWN:
+                # Exit (Guide/Logo Button or Keyboard Esc)
                 # Exit (Back, X, or Guide)
                 # Back=6, X=2, Guide=8
                 if event.button == 6 or event.button == 2 or event.button == 8:
@@ -149,46 +148,81 @@ def main():
                     else:
                         print("⚪ RECORDING STOPPED")
 
-        # --- READ CONTROLS (Standard Teleoperation) ---
-        # Logic from teleoperate_full_control.py
+        # --- READ CONTROLS ---
         
-        # Axes
-        ax0 = joystick.get_axis(0) # LS Left/Right
-        ax1 = joystick.get_axis(1) # LS Up/Down
-        ax3 = joystick.get_axis(3) # RS Left/Right
-        ax4 = joystick.get_axis(4) # RS Up/Down
+        # 1. Read Right Trigger (RT) usually Axis 5
+        # Normalize/Check value. Usually -1 to 1. Pressed > 0.5?
+        rt_val = joystick.get_axis(5)
+        
+        # Logic: If RT > 0.5 -> Manual Mode (Active Lead-Through)
+        if rt_val > 0.5:
+            # --- MANUAL MODE (Follow Hand) ---
+            # Ideally torque is ON (Active) or OFF (Passive).
+            # User wants "zeros out resistance... follow".
+            # We sync target to CURRENT OBSERVATION.
+            fresh_obs = robot.get_observation()
+            
+            for name in motor_names:
+                # Sync Arm Joints.
+                # Do we sync Gripper? User might want to hold gripper state?
+                # User said: "grab the gripper with my hand... manually place it... then release RT"
+                # If we sync gripper, the user can backdrive gripper if they force it.
+                # But buttons control gripper.
+                # Let's sync ALL joints, but overwrite Gripper later if buttons are pressed?
+                key = f"{name}.pos"
+                val = fresh_obs.get(key)
+                if val is not None:
+                     if hasattr(val, "item"): val = val.item()
+                     target_joints[name] = val
 
-        # Buttons (LB=4, RB=5 usually)
-        lb = joystick.get_button(4) 
-        rb = joystick.get_button(5)
-        btn_a = joystick.get_button(0)
-        btn_b = joystick.get_button(1)
+            # Allow Gripper Buttons to Override Manual Sync?
+            # If I hold RT (Manual) and press A (Close), I want it to Close.
+            btn_a = joystick.get_button(0)
+            btn_b = joystick.get_button(1)
+            if btn_a: target_joints["gripper"] = -45
+            if btn_b: target_joints["gripper"] = 90
+            
+        else:
+            # --- JOYSTICK MODE (Standard Teleop) ---
+            # Logic from teleoperate_full_control.py
+            
+            # Axes
+            ax0 = joystick.get_axis(0) # LS Left/Right
+            ax1 = joystick.get_axis(1) # LS Up/Down
+            ax3 = joystick.get_axis(3) # RS Left/Right
+            ax4 = joystick.get_axis(4) # RS Up/Down
 
-        speed = 1.2 # Speed multiplier (Standard)
+            # Buttons (LB=4, RB=5 usually)
+            lb = joystick.get_button(4) 
+            rb = joystick.get_button(5)
+            btn_a = joystick.get_button(0)
+            btn_b = joystick.get_button(1)
 
-        # 1. Base (Shoulder Pan)
-        if abs(ax0) > 0.1:
-             target_joints["shoulder_pan"] += ax0 * speed
+            speed = 0.3 # Speed multiplier (Standard)
 
-        # 2. Shoulder (Shoulder Lift)
-        if abs(ax1) > 0.1:
-             target_joints["shoulder_lift"] -= ax1 * speed
+            # 1. Base (Shoulder Pan)
+            if abs(ax0) > 0.1:
+                 target_joints["shoulder_pan"] += ax0 * speed
 
-        # 3. Elbow (Elbow Flex)
-        if abs(ax4) > 0.1:
-             target_joints["elbow_flex"] -= ax4 * speed
+            # 2. Shoulder (Shoulder Lift)
+            if abs(ax1) > 0.1:
+                 target_joints["shoulder_lift"] -= ax1 * speed
 
-        # 4. Wrist Flex (Right Stick X)
-        if abs(ax3) > 0.1:
-             target_joints["wrist_flex"] -= ax3 * speed
+            # 3. Elbow (Elbow Flex)
+            if abs(ax4) > 0.1:
+                 target_joints["elbow_flex"] -= ax4 * speed
 
-        # 5. Wrist Roll (Bumpers)
-        if lb: target_joints["wrist_roll"] -= speed * 1.5 # Roll Left
-        if rb: target_joints["wrist_roll"] += speed * 1.5 # Roll Right
+            # 4. Wrist Flex (Right Stick X)
+            if abs(ax3) > 0.1:
+                 target_joints["wrist_flex"] -= ax3 * speed
 
-        # 6. Gripper
-        if btn_a: target_joints["gripper"] = -45
-        if btn_b: target_joints["gripper"] = 90
+            # 5. Wrist Roll (Bumpers)
+            if lb: target_joints["wrist_roll"] -= speed * 1.5 # Roll Left
+            if rb: target_joints["wrist_roll"] += speed * 1.5 # Roll Right
+
+            # 6. Gripper
+            if btn_a: target_joints["gripper"] = -45
+            if btn_b: target_joints["gripper"] = 90
 
         # Clamps
         for name in target_joints:
@@ -286,4 +320,3 @@ if __name__ == "__main__":
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning, module='pygame')
     main()
-
