@@ -46,11 +46,12 @@ echo "💾 Committing..."
 git commit -m "Auto-backup to POC repo: $(date)"
 
 # 5. Fix Branch & Push
-echo "🔄 Ensuring 'main' tracks current state..."
-# Force 'main' to match current HEAD (fixes Detached HEAD issue)
-git checkout -B main
+TARGET_BRANCH="Fix-calibration"
+echo "🔄 Ensuring '$TARGET_BRANCH' tracks current state..."
+# Force target branch to match current HEAD
+git checkout -B "$TARGET_BRANCH"
 
 echo "🚀 Pushing to GitHub (Force Pushing)..."
-git push -u origin main --force
+git push -u origin "$TARGET_BRANCH" --force
 
-echo "✅ Done! All root files (e.g. record_dataset.py) have been pushed."
+echo "✅ Done! Code pushed to branch: $TARGET_BRANCH"
