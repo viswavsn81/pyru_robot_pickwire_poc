@@ -10,7 +10,7 @@ from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.policies.factory import make_pre_post_processors
 
 # Configuration
-CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-01/20-33-18_so100_train_14ep/checkpoints/010000/pretrained_model")
+CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-01/20-59-27_so100_dropout_14ep/checkpoints/010000/pretrained_model")
 DEVICE = "cuda"
 FPS = 30
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
@@ -60,6 +60,7 @@ def main():
     
     try:
         prev_action = None
+        action_history = [] # Buffer for Temporal Ensembling
         dt = 1.0 / FPS
         while True:
             start_time = time.perf_counter()
@@ -136,18 +137,39 @@ def main():
             # action shape is (Batch, Time, Dims) -> (Time, Dims)
             action_np = action.squeeze(0).cpu().numpy()
             
-            # Action Selection: Handle 1D (shape [6]) vs 2D (shape [Time, 6])
+            # Action Selection: Temporal Ensembling
+            # Handle 1D (shape [6]) vs 2D (shape [Time, 6])
             if action_np.ndim == 1:
-                current_action = action_np
+                action_np = action_np[np.newaxis, :]
+            
+            # Add current prediction to history
+            action_history.append(action_np)
+            
+            # Average overlapping actions
+            # We iterate backwards: index 0 = current frame prediction
+            # index i = prediction made i frames ago.
+            # For a chunk made 'i' frames ago, we need its action at index 'i'.
+            ensemble_action = np.zeros_like(action_np[0])
+            count = 0
+            
+            # Prune and Aggregate
+            new_history = []
+            for i, pred_chunk in enumerate(reversed(action_history)):
+                if i < len(pred_chunk):
+                    # This chunk is still valid (has an action for the current relative time)
+                    ensemble_action += pred_chunk[i]
+                    count += 1
+                    new_history.append(pred_chunk) # Keep it (temporarily reversed order)
+            
+            # Restore correct order for next loop (reverse of reversed = original order)
+            action_history = new_history[::-1]
+            
+            if count > 0:
+                smoothed_action = ensemble_action / count
             else:
-                current_action = action_np[0]
+                smoothed_action = action_np[0] # Fallback
             
-            # Smoothing (EMA)
-            if prev_action is None:
-                prev_action = current_action
-            
-            smoothed_action = (EMA_ALPHA * current_action) + ((1 - EMA_ALPHA) * prev_action)
-            prev_action = smoothed_action
+            # prev_action = smoothed_action # (Not strictly needed for Ensembling, but harmless)
 
             action_dict = {}
             for i, name in enumerate(MOTOR_NAMES):
