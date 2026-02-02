@@ -390,7 +390,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         accelerator=accelerator,
     )
 
-    DROPOUT_PROB = 0.5
+    DROPOUT_PROB = 0.25
     if is_main_process:
         logging.info(
             f"Start offline training on a fixed dataset, with effective batch size: {effective_batch_size}"

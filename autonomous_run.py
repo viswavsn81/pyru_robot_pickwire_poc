@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import cv2
 import pygame
+import argparse
 from pathlib import Path
 from lerobot.robots.so_follower import SO100Follower, SO100FollowerConfig
 from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
@@ -14,10 +15,22 @@ CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-01/20-59-27_so1
 DEVICE = "cuda"
 FPS = 30
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
-EMA_ALPHA = 0.5
+
+def get_arguments():
+    parser = argparse.ArgumentParser(description="Autonomous Run Script for SO-100 Robot")
+    parser.add_argument("--viz", type=int, default=1, help="Visualization On/Off (1/0). Default 1.")
+    parser.add_argument("--freq", type=int, default=2, help="Query Frequency (Steps between replanning). Default 2.")
+    parser.add_argument("--speed", type=float, default=1.0, help="Speed scalar (Safety dampener). Default 1.0.")
+    return parser.parse_args()
 
 def main():
-    print("🚀 Starting Autonomous Run Script...")
+    args = get_arguments()
+    QUERY_FREQUENCY = args.freq
+    SHOW_VISUALIZATION = bool(args.viz)
+    SPEED_SCALAR = args.speed
+
+    print(f"🚀 Starting Autonomous Run Script...")
+    print(f"   [Config] Viz: {SHOW_VISUALIZATION}, Freq: {QUERY_FREQUENCY}, Speed: {SPEED_SCALAR}")
     
     # 1. Load Policy
     print(f"Loading policy from: {CHECKPOINT_PATH}")
@@ -25,93 +38,62 @@ def main():
     policy.to(DEVICE)
     policy.eval()
     
-    # Load processors
     preprocessor, postprocessor = make_pre_post_processors(policy.config, pretrained_path=CHECKPOINT_PATH)
     print("✅ Policy and processors loaded.")
 
     # 2. Connect Hardware
     print("Connecting to robot...")
-    # Using SO100Follower as requested (matching smoke_test_v2.py)
     robot = SO100Follower(SO100FollowerConfig(
         port="/dev/ttyACM0", id="my_awesome_follower_arm", use_degrees=True
     ))
     robot.connect()
-    print("✅ Robot connected.")
-
+    
     print("Connecting to cameras...")
-    # Laptop: 2, Wrist: 0 (Manual matches smoke_test_v2.py)
-    # Using MJPEG for performance matching record_dataset.py
     laptop_cam = OpenCVCamera(OpenCVCameraConfig(index_or_path=2, fps=FPS, width=640, height=480, fourcc="MJPG"))
     wrist_cam = OpenCVCamera(OpenCVCameraConfig(index_or_path=0, fps=FPS, width=640, height=480, fourcc="MJPG"))
     
     laptop_cam.connect()
     wrist_cam.connect()
-    print("✅ Cameras connected.")
+    print("✅ Hardware connected.")
 
-    # 4. Setup Telemetry UI
-    pygame.init()
-    screen_w, screen_h = 640, 480
-    screen = pygame.display.set_mode((screen_w, screen_h))
-    pygame.display.set_caption("Policy Internals (Blue=Real, Red=Target)")
-    font = pygame.font.SysFont("monospace", 18)
+    # 3. Setup Telemetry UI (Only if Viz is On)
+    screen = None
+    font = None
+    if SHOW_VISUALIZATION:
+        pygame.init()
+        screen_w, screen_h = 640, 480
+        screen = pygame.display.set_mode((screen_w, screen_h))
+        pygame.display.set_caption(f"Policy Internals | Freq: {QUERY_FREQUENCY}")
+        font = pygame.font.SysFont("monospace", 18)
 
-    # 3. Inference Loop
-    print(f"🛑 Press Ctrl+C to stop. Running at {FPS} FPS...")
+    # 4. Inference Loop
+    print(f"🛑 Press Ctrl+C to stop. Sliding Window: {QUERY_FREQUENCY} steps.")
+    
+    inference_count = 0
     
     try:
-        prev_action = None
-        action_history = [] # Buffer for Temporal Ensembling
         dt = 1.0 / FPS
+        
         while True:
-            start_time = time.perf_counter()
+            # --- PHASE A: INFERENCE (Once per QUERY_FREQUENCY) ---
             
-            # Read Sensors
-            # Rely on blocking read for simplicity, assuming cameras run near 30fps.
-            # Ideally use async_read logic if stuttering occurs.
+            # 1. Read Current Observations
             laptop_img = laptop_cam.read()
             wrist_img = wrist_cam.read()
-            
-            # --- LIVE ROBOT EYES (DEBUG) ---
-            if laptop_img is not None and wrist_img is not None:
-                # 1. Color Correction (RGB -> BGR for OpenCV Display)
-                # The camera class returns RGB, but cv2.imshow expects BGR.
-                vis_laptop = cv2.cvtColor(laptop_img, cv2.COLOR_RGB2BGR)
-                vis_wrist = cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR)
-                
-                # 2. Draw "Active Area" (Center Crop)
-                # Input: 640x480, Crop: 480x480 (Center)
-                x1 = (640 - 480) // 2
-                x2 = x1 + 480
-                cv2.rectangle(vis_laptop, (x1, 0), (x2, 480), (0, 255, 0), 2)
-                cv2.rectangle(vis_wrist, (x1, 0), (x2, 480), (0, 255, 0), 2)
-                
-                # 3. Stack & Display
-                combined_img = np.hstack((vis_laptop, vis_wrist))
-                cv2.imshow("Robot Eyes", combined_img)
-                cv2.waitKey(1)
-            # -------------------------------
             
             if laptop_img is None or wrist_img is None:
                 print("Warning: Failed to read camera frame.")
                 continue
 
             robot_obs = robot.get_observation()
-            
-            # Construct Observation State Vector
             state_vec = []
             for name in MOTOR_NAMES:
-                # get_observation keys are usually 'joint_name.pos'
                 val = robot_obs.get(f"{name}.pos")
-                if val is None:
-                    # In case key is missing (e.g. simulation vs real diffs), but SO100Follower should provide it.
-                    print(f"Warning: Missing observation key {name}.pos")
-                    val = 0.0
-                elif hasattr(val, "item"):
-                    val = val.item()
+                if val is None: val = 0.0
+                elif hasattr(val, "item"): val = val.item()
                 state_vec.append(val)
             
-            # Convert to Tensors (B, C, H, W) and (B, D)
-            # Normalize images to [0,1]
+            # 2. Prepare Tensors
             laptop_tensor = torch.from_numpy(laptop_img).permute(2, 0, 1).float() / 255.0
             wrist_tensor = torch.from_numpy(wrist_img).permute(2, 0, 1).float() / 255.0
             state_tensor = torch.tensor(state_vec).float()
@@ -122,123 +104,103 @@ def main():
                 "observation.state": state_tensor.unsqueeze(0).to(DEVICE),
             }
             
-            # Preprocess
+            # 3. Predict Action Chunk
             observation = preprocessor(observation)
             
-            # Inference
+            # Monitoring Inference
+            t_infer_start = time.perf_counter()
             with torch.inference_mode():
                 action = policy.select_action(observation)
+            t_infer_end = time.perf_counter()
             
-            # Postprocess
+            infer_dur = t_infer_end - t_infer_start
+            inference_count += 1
+            if inference_count % 100 == 0:
+                print(f"Inference: {infer_dur:.3f}s")
+            
+            if infer_dur > 0.033:
+                print(f"⚠️  WARNING: GPU TOO SLOW (>{infer_dur:.3f}s)")
+            
             action = postprocessor(action)
-            
-            # Map Output to Robot
-            # Map Output to Robot
-            # action shape is (Batch, Time, Dims) -> (Time, Dims)
             action_np = action.squeeze(0).cpu().numpy()
             
-            # Action Selection: Temporal Ensembling
-            # Handle 1D (shape [6]) vs 2D (shape [Time, 6])
-            if action_np.ndim == 1:
-                action_np = action_np[np.newaxis, :]
+            # 4. Slice Chunk: Take only first N steps
+            if action_np.ndim == 1: action_np = action_np[np.newaxis, :]
+            steps_to_run = action_np[:QUERY_FREQUENCY]
             
-            # Add current prediction to history
-            action_history.append(action_np)
-            
-            # Average overlapping actions
-            # We iterate backwards: index 0 = current frame prediction
-            # index i = prediction made i frames ago.
-            # For a chunk made 'i' frames ago, we need its action at index 'i'.
-            ensemble_action = np.zeros_like(action_np[0])
-            count = 0
-            
-            # Prune and Aggregate
-            new_history = []
-            for i, pred_chunk in enumerate(reversed(action_history)):
-                if i < len(pred_chunk):
-                    # This chunk is still valid (has an action for the current relative time)
-                    ensemble_action += pred_chunk[i]
-                    count += 1
-                    new_history.append(pred_chunk) # Keep it (temporarily reversed order)
-            
-            # Restore correct order for next loop (reverse of reversed = original order)
-            action_history = new_history[::-1]
-            
-            if count > 0:
-                smoothed_action = ensemble_action / count
-            else:
-                smoothed_action = action_np[0] # Fallback
-            
-            # prev_action = smoothed_action # (Not strictly needed for Ensembling, but harmless)
+            # --- PHASE B: EXECUTION LOOP (Run N steps) ---
+            for i, current_action in enumerate(steps_to_run):
+                start_step = time.perf_counter()
+                
+                # 1. Send Action (With Speed Scalar)
+                action_dict = {}
+                for j, name in enumerate(MOTOR_NAMES):
+                    target_val = current_action[j]
+                    
+                    # Apply Speed Scalar (Damping)
+                    # New Target = Current + (Target - Current) * Speed
+                    # We use state_vec which is the robot position at start of inference.
+                    # Ideally we should read fresh obs, but for perf we use state_vec.
+                    current_val_est = state_vec[j] 
+                    damped_val = current_val_est + (target_val - current_val_est) * SPEED_SCALAR
+                    
+                    action_dict[f"{name}.pos"] = torch.tensor([damped_val], dtype=torch.float32)
+                    
+                    # Update state_vec estimate for next step smoothing (simple assumption robot moved)
+                    state_vec[j] = damped_val 
 
-            action_dict = {}
-            for i, name in enumerate(MOTOR_NAMES):
-                # Use the smoothed action value for the specific joint
-                val = smoothed_action[i]
-                action_dict[f"{name}.pos"] = torch.tensor([val], dtype=torch.float32)
-            
-            robot.send_action(action_dict)
-            
-            # --- VISUALIZATION (Telemetry HUD) ---
-            screen.fill((30, 30, 30)) # Dark Grey Background
-            
-            # Draw header
-            text = font.render(f"Step Time: {dt*1000:.1f}ms | FPS: {1/dt:.1f}", True, (255, 255, 255))
-            screen.blit(text, (10, 10))
-            
-            # Draw Bars for each motor
-            bar_h = 40
-            margin = 10
-            start_y = 50
-            
-            for i, name in enumerate(MOTOR_NAMES):
-                # Data
-                real_val = state_vec[i]
-                target_val = smoothed_action[i]
+                robot.send_action(action_dict)
                 
-                # Normalize to screen width (Range: -180 to 180)
-                # Center (0) at screen_w / 2
-                def val_to_x(v):
-                    # Map -180..180 to 0..screen_w
-                    return int((v + 180) / 360 * screen_w)
+                # 2. Update Visualization (Only if Enabled)
+                if SHOW_VISUALIZATION:
+                    if i > 0:
+                        laptop_img = laptop_cam.read()
+                        wrist_img = wrist_cam.read()
+                    
+                    # Viz: Robot Eyes
+                    if laptop_img is not None and wrist_img is not None:
+                        vis_laptop = cv2.cvtColor(laptop_img, cv2.COLOR_RGB2BGR)
+                        vis_wrist = cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR)
+                        
+                        x1 = (640 - 480) // 2
+                        cv2.rectangle(vis_laptop, (x1, 0), (x1+480, 480), (0, 255, 0), 2)
+                        cv2.rectangle(vis_wrist, (x1, 0), (x1+480, 480), (0, 255, 0), 2)
+                        
+                        cv2.imshow("Robot Eyes", np.hstack((vis_laptop, vis_wrist)))
+                        cv2.waitKey(1)
+                    
+                    # Viz: Telemetry
+                    screen.fill((30, 30, 30))
+                    screen.blit(font.render(f"Step: {i+1}/{QUERY_FREQUENCY} | Inf: {infer_dur*1000:.1f}ms", True, (255, 255, 255)), (10, 10))
                 
-                y = start_y + i * (bar_h + margin)
+                    # Bars
+                    start_y = 50
+                    for k, name in enumerate(MOTOR_NAMES):
+                        real_val = state_vec[k] 
+                        target_val = current_action[k]
+                        y = start_y + k * 50
+                        
+                        pygame.draw.rect(screen, (60, 60, 60), (0, y, screen_w, 40)) # BG
+                        cx = int((0 + 180) / 360 * screen_w)
+                        pygame.draw.line(screen, (100, 100, 100), (cx, y), (cx, y+40), 1) # Zero
+                        
+                        tx = int((target_val + 180) / 360 * screen_w)
+                        pygame.draw.rect(screen, (255, 50, 50), (tx-1, y, 2, 40)) # Target
+                        
+                        screen.blit(font.render(f"{name}: {target_val:.1f}", True, (200, 200, 200)), (10, y + 10))
+                        
+                    pygame.display.flip()
+                    
+                    # Pump Events
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT: raise KeyboardInterrupt
                 
-                # 1. Background Bar (Range)
-                pygame.draw.rect(screen, (60, 60, 60), (0, y, screen_w, bar_h))
-                
-                # 2. Zero Line (Center)
-                center_x = val_to_x(0)
-                pygame.draw.line(screen, (100, 100, 100), (center_x, y), (center_x, y+bar_h), 1)
-                
-                # 3. Real Value (Blue Line)
-                real_x = val_to_x(real_val)
-                pygame.draw.rect(screen, (50, 100, 255), (real_x-2, y, 4, bar_h))
-                
-                # 4. Target Value (Red Line)
-                target_x = val_to_x(target_val)
-                pygame.draw.rect(screen, (255, 50, 50), (target_x-1, y, 2, bar_h))
-                
-                # Label
-                label = font.render(f"{name}: {real_val:.1f} -> {target_val:.1f}", True, (200, 200, 200))
-                screen.blit(label, (10, y + 10))
-
-            pygame.display.flip()
-            
-            # Pump events to prevent freezing
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    raise KeyboardInterrupt
-            
-            # Rate limiting
-            dt = time.perf_counter() - start_time
-            sleep_time = max(0, (1/FPS) - dt)
-            time.sleep(sleep_time)
+                step_dur = time.perf_counter() - start_step
+                time.sleep(max(0, dt - step_dur))
 
     except KeyboardInterrupt:
         print("\nStopping...")
     except Exception as e:
-        print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
     finally:
@@ -247,9 +209,10 @@ def main():
             robot.disconnect()
             laptop_cam.disconnect()
             wrist_cam.disconnect()
-            cv2.destroyAllWindows()
-        except:
-            pass
+            if SHOW_VISUALIZATION:
+                cv2.destroyAllWindows()
+                pygame.quit()
+        except: pass
         print("Done.")
 
 if __name__ == "__main__":
