@@ -10,7 +10,7 @@ from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.policies.factory import make_pre_post_processors
 
 # Configuration
-CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-01-31/10-42-55_so100_train_50ep/checkpoints/050000/pretrained_model")
+CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-01/20-33-18_so100_train_14ep/checkpoints/010000/pretrained_model")
 DEVICE = "cuda"
 FPS = 30
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
@@ -69,6 +69,26 @@ def main():
             # Ideally use async_read logic if stuttering occurs.
             laptop_img = laptop_cam.read()
             wrist_img = wrist_cam.read()
+            
+            # --- LIVE ROBOT EYES (DEBUG) ---
+            if laptop_img is not None and wrist_img is not None:
+                # 1. Color Correction (RGB -> BGR for OpenCV Display)
+                # The camera class returns RGB, but cv2.imshow expects BGR.
+                vis_laptop = cv2.cvtColor(laptop_img, cv2.COLOR_RGB2BGR)
+                vis_wrist = cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR)
+                
+                # 2. Draw "Active Area" (Center Crop)
+                # Input: 640x480, Crop: 480x480 (Center)
+                x1 = (640 - 480) // 2
+                x2 = x1 + 480
+                cv2.rectangle(vis_laptop, (x1, 0), (x2, 480), (0, 255, 0), 2)
+                cv2.rectangle(vis_wrist, (x1, 0), (x2, 480), (0, 255, 0), 2)
+                
+                # 3. Stack & Display
+                combined_img = np.hstack((vis_laptop, vis_wrist))
+                cv2.imshow("Robot Eyes", combined_img)
+                cv2.waitKey(1)
+            # -------------------------------
             
             if laptop_img is None or wrist_img is None:
                 print("Warning: Failed to read camera frame.")
@@ -205,6 +225,7 @@ def main():
             robot.disconnect()
             laptop_cam.disconnect()
             wrist_cam.disconnect()
+            cv2.destroyAllWindows()
         except:
             pass
         print("Done.")

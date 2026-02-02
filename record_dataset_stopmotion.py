@@ -1,4 +1,3 @@
-#!/bin/bash
 #!/usr/bin/env python
 
 import os
@@ -90,7 +89,7 @@ def main():
     # Use Pygame for display instead of OpenCV (avoids highgui errors)
     WINDOW_W, WINDOW_H = 1280, 480 # Two 640x480 images side-by-side
     screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-    pygame.display.set_caption("SO-100 Hybrid Recorder - Hold RT for Manual Mode")
+    pygame.display.set_caption("SO-100 Stop-Motion - Press Y to Capture Frame")
 
     # -----------------------------
     # 4. INITIALIZE ROBOT STATE
@@ -110,15 +109,19 @@ def main():
     # -----------------------------
     # 5. CONTROL & RECORDING LOOP
     # -----------------------------
-    print("\n🚀 READY! Controls:")
-    print("  [Start] / [Y]: Toggle Recording")
-    print("  [Back] / [Guide]:   Exit")
-    print("  [Hold RT]:     Manual Mode (Limp/Follow)")
-    print("  [Sticks]:      Drive Robot (Joysticks)\n")
+    print("\n🚀 READY! Stop-Motion Mode:")
+    print("  [Y] / [Start]: Capture Single Frame")
+    print("  [Back] / [Select]: Delete Last Frame")
+    print("  [X] / [Guide]: Exit")
+    print("  Sticks:        Move Robot\n")
 
-    recording = False
-    current_ep_dir = None
+    current_ep_dir = ensure_episode_dir(DATASET_ROOT)
+    print(f"📂 Saving to: {current_ep_dir}")
     frame_idx = 0
+    
+    # State for single-press logic
+    capture_pressed_prev = False
+    delete_pressed_prev = False
     
     running = True
     while running:
@@ -129,100 +132,59 @@ def main():
             if event.type == pygame.QUIT:
                 running = False
             
-            # Button Downs for Toggles
+            # Button Downs for Exit
             if event.type == pygame.JOYBUTTONDOWN:
-                # Exit (Guide/Logo Button or Keyboard Esc)
-                # Exit (Back, X, or Guide)
-                # Back=6, X=2, Guide=8
-                if event.button == 6 or event.button == 2 or event.button == 8:
+                # Exit (X or Guide)
+                # X=2, Guide=8
+                if event.button == 2 or event.button == 8:
                     print("🛑 Exit requested.")
-                    running = False
-                
-                # Toggle Recording (Start or Y)
-                if event.button == 7 or event.button == 3:
-                    recording = not recording
-                    if recording:
-                        current_ep_dir = ensure_episode_dir(DATASET_ROOT)
-                        frame_idx = 0
-                        print(f"🔴 RECORDING STARTED: {current_ep_dir}")
-                    else:
-                        print("⚪ RECORDING STOPPED")
+                    running = False 
 
-        # --- READ CONTROLS ---
+        # --- READ CONTROLS (Standard Teleoperation) ---
+        # Logic from teleoperate_full_control.py
         
-        # 1. Read Right Trigger (RT) usually Axis 5
-        # Normalize/Check value. Usually -1 to 1. Pressed > 0.5?
-        rt_val = joystick.get_axis(5)
+        # Axes
+        ax0 = joystick.get_axis(0) # LS Left/Right
+        ax1 = joystick.get_axis(1) # LS Up/Down
+        ax3 = joystick.get_axis(3) # RS Left/Right
+        ax4 = joystick.get_axis(4) # RS Up/Down
+
+        # Buttons (LB=4, RB=5 usually)
+        lb = joystick.get_button(4) 
+        rb = joystick.get_button(5)
+        btn_a = joystick.get_button(0)
+        btn_b = joystick.get_button(1)
+        # Back Button (6) for Deletion
+        btn_back = joystick.get_button(6)
         
-        # Logic: If RT > 0.5 -> Manual Mode (Active Lead-Through)
-        if rt_val > 0.5:
-            # --- MANUAL MODE (Follow Hand) ---
-            # Ideally torque is ON (Active) or OFF (Passive).
-            # User wants "zeros out resistance... follow".
-            # We sync target to CURRENT OBSERVATION.
-            fresh_obs = robot.get_observation()
-            
-            for name in motor_names:
-                # Sync Arm Joints.
-                # Do we sync Gripper? User might want to hold gripper state?
-                # User said: "grab the gripper with my hand... manually place it... then release RT"
-                # If we sync gripper, the user can backdrive gripper if they force it.
-                # But buttons control gripper.
-                # Let's sync ALL joints, but overwrite Gripper later if buttons are pressed?
-                key = f"{name}.pos"
-                val = fresh_obs.get(key)
-                if val is not None:
-                     if hasattr(val, "item"): val = val.item()
-                     target_joints[name] = val
+        # Capture Button: Y (3) or Start (7)
+        btn_capture = joystick.get_button(3) or joystick.get_button(7)
 
-            # Allow Gripper Buttons to Override Manual Sync?
-            # If I hold RT (Manual) and press A (Close), I want it to Close.
-            btn_a = joystick.get_button(0)
-            btn_b = joystick.get_button(1)
-            if btn_a: target_joints["gripper"] = -45
-            if btn_b: target_joints["gripper"] = 90
-            
-        else:
-            # --- JOYSTICK MODE (Standard Teleop) ---
-            # Logic from teleoperate_full_control.py
-            
-            # Axes
-            ax0 = joystick.get_axis(0) # LS Left/Right
-            ax1 = joystick.get_axis(1) # LS Up/Down
-            ax3 = joystick.get_axis(3) # RS Left/Right
-            ax4 = joystick.get_axis(4) # RS Up/Down
+        speed = 0.1 # Speed multiplier (Standard)
 
-            # Buttons (LB=4, RB=5 usually)
-            lb = joystick.get_button(4) 
-            rb = joystick.get_button(5)
-            btn_a = joystick.get_button(0)
-            btn_b = joystick.get_button(1)
+        # 1. Base (Shoulder Pan)
+        if abs(ax0) > 0.1:
+             target_joints["shoulder_pan"] += ax0 * speed
 
-            speed = 0.1 # Speed multiplier (Standard)
+        # 2. Shoulder (Shoulder Lift)
+        if abs(ax1) > 0.1:
+             target_joints["shoulder_lift"] -= ax1 * speed
 
-            # 1. Base (Shoulder Pan)
-            if abs(ax0) > 0.1:
-                 target_joints["shoulder_pan"] += ax0 * speed
+        # 3. Elbow (Elbow Flex)
+        if abs(ax4) > 0.1:
+             target_joints["elbow_flex"] -= ax4 * speed
 
-            # 2. Shoulder (Shoulder Lift)
-            if abs(ax1) > 0.1:
-                 target_joints["shoulder_lift"] -= ax1 * speed
+        # 4. Wrist Flex (Right Stick X)
+        if abs(ax3) > 0.1:
+             target_joints["wrist_flex"] -= ax3 * speed
 
-            # 3. Elbow (Elbow Flex)
-            if abs(ax4) > 0.1:
-                 target_joints["elbow_flex"] -= ax4 * speed
+        # 5. Wrist Roll (Bumpers)
+        if lb: target_joints["wrist_roll"] -= speed * 1.5 # Roll Left
+        if rb: target_joints["wrist_roll"] += speed * 1.5 # Roll Right
 
-            # 4. Wrist Flex (Right Stick X)
-            if abs(ax3) > 0.1:
-                 target_joints["wrist_flex"] -= ax3 * speed
-
-            # 5. Wrist Roll (Bumpers)
-            if lb: target_joints["wrist_roll"] -= speed * 1.5 # Roll Left
-            if rb: target_joints["wrist_roll"] += speed * 1.5 # Roll Right
-
-            # 6. Gripper
-            if btn_a: target_joints["gripper"] = -45
-            if btn_b: target_joints["gripper"] = 90
+        # 6. Gripper
+        if btn_a: target_joints["gripper"] = -45
+        if btn_b: target_joints["gripper"] = 90
 
         # Clamps
         for name in target_joints:
@@ -257,33 +219,21 @@ def main():
             
             screen.blit(viz_surf, (0, 0))
             
-            # Overlay Recording Status
-            if recording:
-                pygame.draw.circle(screen, (255, 0, 0), (30, 30), 10) # Red Circle
-                font = pygame.font.SysFont(None, 36)
-                text = font.render(f"REC Frame: {frame_idx}", True, (255, 0, 0))
-                screen.blit(text, (50, 20))
+            # Overlay Frame Count
+            font = pygame.font.SysFont(None, 48)
+            text = font.render(f"Frames: {frame_idx}", True, (255, 255, 0))
+            screen.blit(text, (50, 20))
             
-            # Overlay Motor Positions
-            font_small = pygame.font.SysFont(None, 24)
-            # Background
-            bg_rect = pygame.Surface((220, 180)) # H,W
-            bg_rect.set_alpha(128)
-            bg_rect.fill((0, 0, 0))
-            screen.blit(bg_rect, (10, 60))
-            
-            y_offset = 70
-            for name in motor_names:
-                val = target_joints.get(name, 0.0)
-                # Show active/real value
-                text_surf = font_small.render(f"{name}: {val:.1f}", True, (200, 255, 200))
-                screen.blit(text_surf, (20, y_offset))
-                y_offset += 25
+            # Flash effect on capture
+            # (Simple logic: if just captured, maybe draw a white rectangle for 1 frame? 
+            # hard to time without state, keeping simple for now)
             
             pygame.display.flip()
 
-            # --- RECORDING ---
-            if recording and current_ep_dir:
+            # --- STOP MOTION CAPTURE ---
+            if btn_capture and not capture_pressed_prev:
+                print(f"📸 Capturing Frame {frame_idx}...")
+                
                 # Save Images (OpenCV needs BGR)
                 laptop_bgr = cv2.cvtColor(laptop_img, cv2.COLOR_RGB2BGR)
                 wrist_bgr = cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR)
@@ -311,7 +261,38 @@ def main():
                 with open(current_ep_dir / f"frame_{frame_idx:06d}.json", "w") as f:
                     json.dump(data_point, f)
                 
+                print(f"✅ Saved Frame {frame_idx}")
                 frame_idx += 1
+                
+                # Cool-down not needed due to latch (capture_pressed_prev)
+                # But maybe a beep?
+            
+            capture_pressed_prev = btn_capture
+            
+            # --- DELETE LAST FRAME ---
+            if btn_back and not delete_pressed_prev:
+                if frame_idx > 0:
+                    last_idx = frame_idx - 1
+                    print(f"🗑️ Deleting Frame {last_idx}...")
+                    
+                    try:
+                        # Files to delete
+                        f1 = current_ep_dir / f"laptop_{last_idx:06d}.jpg"
+                        f2 = current_ep_dir / f"wrist_{last_idx:06d}.jpg"
+                        f3 = current_ep_dir / f"frame_{last_idx:06d}.json"
+                        
+                        if f1.exists(): f1.unlink()
+                        if f2.exists(): f2.unlink()
+                        if f3.exists(): f3.unlink()
+                        
+                        print(f"✅ Deleted Frame {last_idx}")
+                        frame_idx -= 1
+                    except Exception as e:
+                        print(f"❌ Error deleting frame: {e}")
+                else:
+                    print("⚠️ No frames to delete!")
+            
+            delete_pressed_prev = btn_back
 
         # Timing
         precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
