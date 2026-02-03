@@ -12,7 +12,7 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
 
 # Configuration
-CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-02/18-26-42_so100_diffusion_dropout_21ep/checkpoints/020000/pretrained_model")
+CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-03/13-38-15_diffusion_test_run/checkpoints/001000/pretrained_model")
 DEVICE = "cuda"
 FPS = 30
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]

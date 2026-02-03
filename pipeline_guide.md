@@ -1,78 +1,59 @@
-# SO-100 End-to-End Pipeline Guide
-This authentic guide details the steps to record data, train a policy, and run it on the physical SO-100 robot.
+# SO-100 Hybrid Pipeline Guide
 
-## 1. Preparation
-Ensure hardware is set up:
-- **Robot**: SO-100 connected via USB (`/dev/ttyACM0`).
-- **Cameras**:
-    - Wrist Camera: Index 0
-    - Laptop/External Camera: Index 2
-- **Controller**: Xbox Controller connected via Bluetooth/USB.
+This guide documents the exact commands for the "Hybrid" workflow (Stop-Motion + Real-Time Clutch) using the StereoPi Camera via FFmpeg and a USB Desk Camera.
 
-## 2. Data Collection (Recording)
-Run the recording script to collect teleoperation episodes.
+## 1. Recording Data (Hybrid 3D Stop-Motion)
+
+Run the recorder script which uses **FFmpeg** for the wrist camera (UDP) and **OpenCV** for the desk camera.
+
+**Command:**
 ```bash
-python lerobot/record_dataset.py
-```
-### Controls
-- **Start / Y**: Toggle Recording (Red circle appears on screen).
-- **Back / X**: Exit script.
-- **Joysticks**: Move robot arms.
-- **A / B**: Close / Open Gripper.
-
-**Data Location**: Episodes are saved to `dataset/episode_XXX`.
-
-## 2.1. Clean Up (Optional)
-To start collecting a brand new dataset from scratch:
-```bash
-rm -rf dataset/*             # Clear raw recordings
-rm -rf local/so100_test      # Clear converted dataset
-```
-*Note: This permanently deletes previous data.*
-
-## 2.2. Delete Last Episode
-If you made a mistake (e.g., in the last recording), you can delete a specific episode:
-```bash
-rm -rf dataset/episode_XXX   # Replace XXX with the episode number (e.g., episode_008)
+python record_dataset_3d_stopmotion_hybrid.py
 ```
 
-## 3. Data Conversion
-Convert the raw recorded data into a LeRobot-compatible dataset format.
-```bash
-python lerobot/convert_data.py
-```
-- **Input**: Reads from `dataset/`.
-- **Output**: Creates/Overwrites `local/so100_test`.
-- **Modification**: To change the dataset name, edit `REPO_ID = "local/your_name"` in `convert_data.py`.
+**Controls:**
+- **Hold RT (Trigger)**: Manual/Limp Mode (Hand-over-hand positioning).
+- **Sticks**: Teleoperation.
+- **Start (Menu)**: Start/Stop Episode.
+- **X Button**: Switch to "Stop-Motion" mode (Single frame capture).
+- **Y Button**: Capture frame (when in Stop-Motion mode).
 
-## 4. Policy Training
-Train an ACT policy on the converted dataset.
+---
+
+## 2. Training (ACT Policy - Low Memory)
+
+Use this specific command to train the **ACT** policy on a GPU with limited VRAM (e.g., laptop GPU). Typical training time: ~2000 steps.
+
+**Command:**
 ```bash
 python src/lerobot/scripts/lerobot_train.py \
-    --policy.type=act \
-    --dataset.repo_id=local/so100_test \
-    --dataset.root=/home/pyru/lerobot/local/so100_test \
-    --batch_size=10 \
-    --steps=50000 \
-    --policy.device=cuda \
-    --job_name=so100_train_50ep \
-    --policy.repo_id=local/so100_policy
+  --policy.type=act \
+  --dataset.repo_id=local/so100_test \
+  --dataset.root=dataset \
+  --batch_size=16 \
+  --steps=2000 \
+  --save_freq=1000 \
+  --policy.use_amp=true \
+  --policy.device=cuda \
+  --job_name=act_hybrid_run
 ```
-- **batch_size**: Set to 10 for your 50-episode dataset.
-- **steps**: Set to 50,000 for a comprehensive training run.
 
-**Output**: Checkpoints are saved in `outputs/train/{date}/{job_name}/checkpoints`.
+**Key Parameters:**
+- `batch_size=16`: Reduced from default to fit VRAM.
+- `policy.use_amp=true`: Enables Automatic Mixed Precision (saves memory & speeds up training).
+- `steps=2000`: Sufficient for a quick robust policy.
 
-## 5. Deployment (Autonomous Run)
-Run the trained policy on the robot.
+---
 
-1. **Locate Checkpoint**: Find the path to your best checkpoint (e.g., `outputs/train/.../checkpoints/000500/pretrained_model`).
-2. **Update Script**: Edit `lerobot/autonomous_run.py`:
-   ```python
-   CHECKPOINT_PATH = Path("/path/to/your/checkpoint/pretrained_model")
-   ```
-3. **Run**:
-   ```bash
-   python lerobot/autonomous_run.py
-   ```
-- **Stop**: Press `Ctrl+C` to safely stop the robot.
+## 3. Inference (Running the Policy)
+
+Run the inference script on the real robot.
+
+**Command:**
+```bash
+python run_ACT_policy_hybrid.py
+```
+
+**Notes:**
+- **Key Mapping Fix**: This script handles the 'laptop' vs 'desk' key mapping automatically (Training expects 'laptop', Recorder saves 'laptop' (as desk), so it matches).
+- **Safety**: Ensure you have a hand on the kill switch (Ctrl+C) or Spacebar (if safety switch enabled).
