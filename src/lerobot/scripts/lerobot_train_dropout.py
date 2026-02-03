@@ -22,6 +22,7 @@ from pprint import pformat
 from typing import Any
 
 import torch
+from torchvision import transforms
 from accelerate import Accelerator
 from termcolor import colored
 from torch.optim import Optimizer
@@ -391,11 +392,13 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     )
 
     DROPOUT_PROB = 0.25
+    JITTER_PAD = 10
     if is_main_process:
         logging.info(
             f"Start offline training on a fixed dataset, with effective batch size: {effective_batch_size}"
         )
         logging.info(colored(f"⚠️  CAMERA DROPOUT ACTIVE: 50% probability of blacking out 'laptop' camera.", "red", attrs=["bold"]))
+        logging.info(colored(f"⚠️  IMAGE JITTER ACTIVE: Random Shift +/- {JITTER_PAD} pixels.", "red", attrs=["bold"]))
 
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
@@ -406,6 +409,45 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             # Overwrite with Zeros (Black Image)
             batch["observation.images.laptop"] = torch.zeros_like(batch["observation.images.laptop"])
         # ----------------------------
+
+        # --- IMAGE JITTER LOGIC (AUGMENTATION) ---
+        # Apply Pad + RandomCrop to simulate camera shake/drift.
+        # Independent per camera to break pixel correlation.
+        
+        # Helper to apply jitter to a single key if it exists
+        def apply_jitter(batch_dict, key):
+            if key in batch_dict:
+                images = batch_dict[key] # [Batch, C, H, W] or [Batch, Time, C, H, W]
+                # Check dimensions
+                ndim = images.ndim
+                if ndim == 5: # [B, T, C, H, W]
+                    B, T, C, H, W = images.shape
+                    # Flatten B*T for transform
+                    images_flat = images.view(B * T, C, H, W)
+                    
+                    # Define Transform (Dynamic based on H, W)
+                    # Note: We must re-define RandomCrop each time or use it carefully if H/W changes?
+                    # Assuming fixed H, W for the dataset.
+                    jitter = transforms.Compose([
+                        transforms.Pad(JITTER_PAD, padding_mode='edge'),
+                        transforms.RandomCrop((H, W))
+                    ])
+                    
+                    # Apply
+                    batch_dict[key] = jitter(images_flat).view(B, T, C, H, W)
+                    
+                elif ndim == 4: # [B, C, H, W]
+                    B, C, H, W = images.shape
+                    jitter = transforms.Compose([
+                        transforms.Pad(JITTER_PAD, padding_mode='edge'),
+                        transforms.RandomCrop((H, W))
+                    ])
+                    batch_dict[key] = jitter(images)
+
+        # Apply independently
+        apply_jitter(batch, "observation.images.laptop")
+        apply_jitter(batch, "observation.images.wrist")
+        # ----------------------------------------
 
         batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time

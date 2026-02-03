@@ -8,10 +8,11 @@ from pathlib import Path
 from lerobot.robots.so_follower import SO100Follower, SO100FollowerConfig
 from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
 
 # Configuration
-CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-01/20-59-27_so100_dropout_14ep/checkpoints/010000/pretrained_model")
+CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-02/18-26-42_so100_diffusion_dropout_21ep/checkpoints/020000/pretrained_model")
 DEVICE = "cuda"
 FPS = 30
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
@@ -21,6 +22,10 @@ def get_arguments():
     parser.add_argument("--viz", type=int, default=1, help="Visualization On/Off (1/0). Default 1.")
     parser.add_argument("--freq", type=int, default=2, help="Query Frequency (Steps between replanning). Default 2.")
     parser.add_argument("--speed", type=float, default=1.0, help="Speed scalar (Safety dampener). Default 1.0.")
+    parser.add_argument("--x_offset", type=float, default=0.0, help="X (Pan) Offset. Default 0.0.")
+    parser.add_argument("--y_offset", type=float, default=0.0, help="Y (Lift) Offset. Default 0.0.")
+    parser.add_argument("--z_offset", type=float, default=0.0, help="Z (Elbow) Offset. Default 0.0.")
+    parser.add_argument("--policy", type=str, choices=["act", "diffusion"], default="act", help="Policy Type (act/diffusion). Default act.")
     return parser.parse_args()
 
 def main():
@@ -28,13 +33,21 @@ def main():
     QUERY_FREQUENCY = args.freq
     SHOW_VISUALIZATION = bool(args.viz)
     SPEED_SCALAR = args.speed
+    OFFSETS = [args.x_offset, args.y_offset, args.z_offset]
+    POLICY_TYPE = args.policy
 
     print(f"🚀 Starting Autonomous Run Script...")
     print(f"   [Config] Viz: {SHOW_VISUALIZATION}, Freq: {QUERY_FREQUENCY}, Speed: {SPEED_SCALAR}")
+    print(f"   [Offsets] X(Pan): {OFFSETS[0]}, Y(Lift): {OFFSETS[1]}, Z(Elbow): {OFFSETS[2]}")
+    print(f"   [Policy] Type: {POLICY_TYPE}")
     
     # 1. Load Policy
     print(f"Loading policy from: {CHECKPOINT_PATH}")
-    policy = ACTPolicy.from_pretrained(CHECKPOINT_PATH)
+    if POLICY_TYPE == "diffusion":
+        policy = DiffusionPolicy.from_pretrained(CHECKPOINT_PATH)
+    else:
+        policy = ACTPolicy.from_pretrained(CHECKPOINT_PATH)
+    
     policy.to(DEVICE)
     policy.eval()
     
@@ -136,6 +149,10 @@ def main():
                 action_dict = {}
                 for j, name in enumerate(MOTOR_NAMES):
                     target_val = current_action[j]
+                    
+                    # Apply Manual Offsets (to indices 0, 1, 2)
+                    if j < 3:
+                        target_val += OFFSETS[j]
                     
                     # Apply Speed Scalar (Damping)
                     # New Target = Current + (Target - Current) * Speed
