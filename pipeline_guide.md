@@ -57,3 +57,29 @@ python run_ACT_policy_hybrid.py
 **Notes:**
 - **Key Mapping Fix**: This script handles the 'laptop' vs 'desk' key mapping automatically (Training expects 'laptop', Recorder saves 'laptop' (as desk), so it matches).
 - **Safety**: Ensure you have a hand on the kill switch (Ctrl+C) or Spacebar (if safety switch enabled).
+
+---
+
+## 4. Data Management
+
+Commands to manage your dataset.
+
+**Delete a Specific Episode (e.g., episode_005):**
+```bash
+rm -rf dataset/episode_005
+```
+
+**Delete ALL Raw Episodes (Clear Dataset):**
+```bash
+rm -rf dataset/episode_*
+```
+
+**Delete Converted Data (LeRobot Format):**
+```bash
+rm -rf local/so100_test
+```
+
+**Full Reset (Delete EVERYTHING):**
+```bash
+rm -rf dataset/episode_* local/so100_test
+```

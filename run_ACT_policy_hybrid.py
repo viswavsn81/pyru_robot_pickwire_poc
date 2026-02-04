@@ -14,7 +14,7 @@ from lerobot.policies.factory import make_pre_post_processors
 # --- CONFIGURATION ---
 # CHANGE 2: Update this path to your NEW ACT model folder. 
 # Check your 'outputs/train' folder for the exact timestamp.
-CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-03/14-24-36_act_one_episode_test/checkpoints/002000/pretrained_model")
+CHECKPOINT_PATH = Path("/home/pyru/lerobot/outputs/train/2026-02-04/07-26-58_act_hybrid_21ep/checkpoints/025000/pretrained_model")
 
 DEVICE = "cuda"
 FPS = 30
@@ -91,9 +91,41 @@ def find_desk_camera():
     print("❌ Could not find any working Desk Camera!")
     return None
 
+def perform_safe_startup(robot):
+    print("⚠️  Moving to Safe Startup Posture...")
+    obs = robot.get_observation()
+    action_dict = {}
+    
+    for i, name in enumerate(MOTOR_NAMES):
+        val = obs.get(f"{name}.pos")
+        if hasattr(val, "item"): val = val.item()
+        
+        # Flex Elbow (Index 2) to clear table
+        if name == "elbow_flex":
+            val += -20.0
+            
+        action_dict[f"{name}.pos"] = torch.tensor([val], dtype=torch.float32)
+        
+    robot.send_action(action_dict)
+    time.sleep(2.0)
+    print("✅ Safe Posture Reached.")
+
+def get_arguments():
+    parser = argparse.ArgumentParser(description="ACT Policy Runner with Offsets")
+    parser.add_argument("--offset-pan", type=float, default=0.0, help="Offset for Shoulder Pan (Index 0)")
+    parser.add_argument("--offset-lift", type=float, default=0.0, help="Offset for Shoulder Lift (Index 1)")
+    parser.add_argument("--offset-elbow", type=float, default=0.0, help="Offset for Elbow Flex (Index 2)")
+    parser.add_argument("--slow-speed", type=float, default=0.3, help="Speed scale when S is held (Default 0.3)")
+    return parser.parse_args()
+
 def main():
+    args = get_arguments()
+    OFFSETS = [args.offset_pan, args.offset_lift, args.offset_elbow]
+
     print(f"🚀 Starting ACT Policy Runner...")
     print(f"   [Model] {CHECKPOINT_PATH}")
+    print(f"   [Offsets] Pan: {OFFSETS[0]}, Lift: {OFFSETS[1]}, Elbow: {OFFSETS[2]}")
+    print(f"   [Slow Scale] {args.slow_speed} (Hold 'S')")
     
     # 1. Load Policy
     print(f"Loading ACT Policy...")
@@ -118,6 +150,7 @@ def main():
         ))
         robot.connect()
         print("✅ Robot Connected!")
+        perform_safe_startup(robot)
     except Exception as e:
         print(f"❌ Robot connection failed: {e}")
         return
@@ -147,8 +180,20 @@ def main():
     font = pygame.font.SysFont("monospace", 18)
 
     print("\n🟢 SYSTEM READY.")
+    print(f"   [OFFSETS APPLIED] Pan: {OFFSETS[0]}, Lift: {OFFSETS[1]}, Elbow: {OFFSETS[2]}")
     print("   HOLD [SPACEBAR] TO ENABLE ROBOT MOVEMENT.")
+    print("   HOLD [S] FOR SLOW MODE ({args.slow_speed}x).")
     print("   PRESS [Q] TO QUIT.\n")
+
+    # Initialize Smoothed Action Tracker with current position
+    # This prevents jumps when the loop starts
+    obs = robot.get_observation()
+    smoothed_action = []
+    for name in MOTOR_NAMES:
+        val = obs.get(f"{name}.pos", 0.0)
+        if hasattr(val, "item"): val = val.item()
+        smoothed_action.append(val)
+    smoothed_action = np.array(smoothed_action, dtype=np.float32)
 
     running = True
     try:
@@ -162,6 +207,10 @@ def main():
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_q: running = False
             
             safety_enabled = keys[pygame.K_SPACE]
+            slow_mode = keys[pygame.K_s]
+            
+            # Determine Speed Scale
+            current_speed_scale = args.slow_speed if slow_mode else 1.0
 
             # --- SENSORS ---
             desk_img = desk_cam.read()
@@ -211,15 +260,33 @@ def main():
 
             # --- EXECUTION ---
             if safety_enabled:
+                # 1. Prepare Full Target Vector (Target + Offsets)
+                full_target = target_action.copy()
+                for i in range(3): # Apply Offsets to Pan, Lift, Elbow
+                    full_target[i] += OFFSETS[i]
+                
+                # 2. Apply EMA Smoothing (Precision Clutch)
+                # alpha = 1.0 (Direct Control) vs 0.X (Slow/Smoothed)
+                alpha = current_speed_scale
+                smoothed_action = (smoothed_action * (1.0 - alpha)) + (full_target * alpha)
+                
                 action_dict = {}
                 for i, name in enumerate(MOTOR_NAMES):
-                    val = target_action[i]
+                    final_val = smoothed_action[i]
+                    
                     if name != "gripper":
-                         val = np.clip(val, -175, 175)
-                    action_dict[f"{name}.pos"] = torch.tensor([val], dtype=torch.float32)
+                         final_val = np.clip(final_val, -175, 175)
+                         
+                    action_dict[f"{name}.pos"] = torch.tensor([final_val], dtype=torch.float32)
+
                 robot.send_action(action_dict)
-                status_msg = "RUNNING"
-                status_color = (0, 255, 0)
+                
+                if slow_mode:
+                    status_msg = f"SLOW MODE ({current_speed_scale}x)"
+                    status_color = (0, 150, 255) # Blue-ish
+                else:
+                    status_msg = "RUNNING"
+                    status_color = (0, 255, 0)
             else:
                 status_msg = "PAUSED (HOLD SPACE)"
                 status_color = (255, 50, 50)
