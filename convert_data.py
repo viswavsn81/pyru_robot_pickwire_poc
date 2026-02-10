@@ -9,10 +9,9 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 # Configuration
 REPO_ID = "local/so100_test"
 FPS = 30
-DATASET_ROOT = Path("dataset")
+DATASET_ROOT = Path("dataset_strict") # Pointing to the trimmed raw data
 
 # Define features
-# Note: "action" and "observation.state" dimensions must match the number of motors
 FEATURES = {
     "observation.images.laptop": {
         "dtype": "video",
@@ -63,13 +62,6 @@ def main():
     # 1. Create Empty Dataset
     print(f"🚀 Creating LeRobotDataset: {REPO_ID}")
     
-    # Check if dataset already exists and remove it to start buffer fresh or handle overwrite
-    # For this script we assume we want to create it new. 
-    # LeRobotDataset.create will raise error if root exists, unless we handle it or use existing one.
-    # But user asked to "create a new empty dataset repo locally".
-    # We'll rely on create() to set it up. If it exists, we might need to delete it manually or handle it.
-    # Let's try simple creation.
-    
     dataset_out = Path("local/so100_test")
     if dataset_out.exists():
         import shutil
@@ -88,27 +80,31 @@ def main():
         return
 
     # 2. Iterate through episodes
+    if not DATASET_ROOT.exists():
+        print(f"❌ Source directory {DATASET_ROOT} does not exist!")
+        return
+
     episode_dirs = sorted([p for p in DATASET_ROOT.iterdir() if p.is_dir() and p.name.startswith("episode_")])
     
     if not episode_dirs:
-        print("❌ No episodes found in dataset/ folder.")
+        print(f"❌ No episodes found in {DATASET_ROOT} folder.")
         return
 
-    print(f"📂 Found {len(episode_dirs)} episodes.")
+    print(f"📂 Found {len(episode_dirs)} episodes in {DATASET_ROOT}.")
 
     for ep_idx, ep_dir in enumerate(episode_dirs):
         print(f"  Processing {ep_dir.name} ({ep_idx + 1}/{len(episode_dirs)})...")
         
         # Load all frames for this episode
-        frame_files = sorted(ep_dir.glob("frame_*.json"))
+        # Use numerical sort for frame loading too!
+        import os
+        frame_files = sorted(ep_dir.glob("frame_*.json"), key=lambda f: int(f.stem.split('_')[1]))
         
         if not frame_files:
             print(f"  ⚠️  No frames found in {ep_dir}")
             continue
 
         for frame_file in frame_files:
-            # Extract index from filename just to be sure we match images correctly
-            # format: frame_XXXXXX.json
             frame_idx_str = frame_file.stem.split("_")[1]
             
             with open(frame_file, "r") as f:
@@ -133,10 +129,12 @@ def main():
             act_data = data["action"]
             
             for name in MOTOR_NAMES:
-                # Observation keys in JSON are "joint_name.pos"
                 state_vec.append(obs_data.get(f"{name}.pos", 0.0))
-                # Action keys in JSON are "joint_name"
-                action_vec.append(act_data.get(name, 0.0))
+                # Allow for list-based actions if JSON has them?
+                # Your code snippet assumed dict get(name, 0.0) which is fine for raw recorded data
+                # But robustness check:
+                val = act_data.get(name, 0.0)
+                action_vec.append(val)
                 
             # Create Frame Dictionary
             frame = {
@@ -150,7 +148,7 @@ def main():
             ds.add_frame(frame)
         
         # Save Episode
-        ds.save_episode(episode_data=None) # Saves whatever is in buffer from add_frame
+        ds.save_episode(episode_data=None) 
         print(f"  ✅ Saved {ep_dir.name}")
 
     # 3. Finalize
